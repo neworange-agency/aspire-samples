@@ -2,11 +2,12 @@ import { env } from 'node:process';
 import { NodeSDK } from '@opentelemetry/sdk-node';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-grpc';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-grpc';
-import { PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
+import { PeriodicExportingMetricReader, MeterProvider } from '@opentelemetry/sdk-metrics';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { ExpressInstrumentation } from '@opentelemetry/instrumentation-express';
 import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici';
 import { RedisInstrumentation } from '@opentelemetry/instrumentation-redis-4';
+import { metrics } from '@opentelemetry/api';
 import winston from 'winston';
 import { OpenTelemetryTransportV3 } from '@opentelemetry/winston-transport';
 
@@ -37,6 +38,53 @@ if (otlpServer) {
     });
 
     sdk.start();
+}
+
+// Create custom meter for application metrics
+const meter = metrics.getMeter('nodefrontend');
+
+// Create custom metrics
+export const cacheHitCounter = meter.createCounter('cache.hits', {
+    description: 'Number of cache hits',
+    unit: 'hits'
+});
+
+export const cacheMissCounter = meter.createCounter('cache.misses', {
+    description: 'Number of cache misses',
+    unit: 'misses'
+});
+
+export const cacheHitRateGauge = meter.createObservableGauge('cache.hit_rate', {
+    description: 'Cache hit rate as a percentage',
+    unit: '%'
+});
+
+// Track cache statistics
+let cacheStats = {
+    hits: 0,
+    misses: 0
+};
+
+// Register callback for cache hit rate gauge
+cacheHitRateGauge.addCallback((observableResult) => {
+    const total = cacheStats.hits + cacheStats.misses;
+    const hitRate = total > 0 ? (cacheStats.hits / total) * 100 : 0;
+    observableResult.observe(hitRate);
+});
+
+// Export functions to record cache statistics
+export function recordCacheHit(city) {
+    cacheStats.hits++;
+    cacheHitCounter.add(1, { city });
+}
+
+export function recordCacheMiss(city) {
+    cacheStats.misses++;
+    cacheMissCounter.add(1, { city });
+}
+
+export function getCacheStats() {
+    return { ...cacheStats };
 }
 
 // Setup Winston logger factory with OpenTelemetry transport

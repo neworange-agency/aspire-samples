@@ -47,12 +47,14 @@ public static class Extensions
             {
                 metrics.AddAspNetCoreInstrumentation()
                        .AddHttpClientInstrumentation()
-                       .AddRuntimeInstrumentation();
+                       .AddRuntimeInstrumentation()
+                       .AddMeter("AspireWithNode.WeatherApi"); // Add custom meter
             })
             .WithTracing(tracing =>
             {
                 tracing
                     .AddSource(builder.Environment.ApplicationName)
+                    .AddSource("AspireWithNode.WeatherApi") // Add custom activity source
                     .AddAspNetCoreInstrumentation(tracing =>
                         // Don't trace requests to the health endpoint to avoid filling the dashboard with noise
                         tracing.Filter = httpContext =>

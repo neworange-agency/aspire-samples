@@ -1,17 +1,46 @@
 //- Render an html page containing a table of weather forecasts
 html
-    head(title=Weather Forecasts)
+    head
+        title Weather Forecasts
+        style.
+            body { font-family: Arial, sans-serif; margin: 20px; }
+            table { border-collapse: collapse; width: 100%; max-width: 600px; margin-top: 20px; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+            th { background-color: #4CAF50; color: white; }
+            tr:nth-child(even) { background-color: #f2f2f2; }
+            .city-links { margin: 20px 0; }
+            .city-links a { margin-right: 15px; padding: 8px 16px; background-color: #008CBA; color: white; text-decoration: none; border-radius: 4px; }
+            .city-links a:hover { background-color: #005f7f; }
+            .city-links a.active { background-color: #4CAF50; }
     body
-        h1 Weather Forecasts
-        table
-            thead
-                tr
-                    th Date
-                    th Temperature (C)
-                    th Summary
-            tbody
-                each forecast in forecasts
+        h1 Weather Forecasts for #{city}
+        div.city-links
+            strong Select City: 
+            a(href="/?city=Seattle" class=(city === 'Seattle' ? 'active' : '')) Seattle
+            a(href="/?city=Miami" class=(city === 'Miami' ? 'active' : '')) Miami
+            a(href="/?city=Chicago" class=(city === 'Chicago' ? 'active' : '')) Chicago
+            a(href="/?city=Phoenix" class=(city === 'Phoenix' ? 'active' : '')) Phoenix
+            a(href="/?city=Boston" class=(city === 'Boston' ? 'active' : '')) Boston
+        
+        if error
+            div(style="background-color: #f44336; color: white; padding: 15px; margin: 20px 0; border-radius: 4px;")
+                strong Error: 
+                span= error
+        
+        if forecasts && forecasts.length > 0
+            table
+                thead
                     tr
-                        td=forecast.date
-                        td=forecast.temperatureC
-                        td=forecast.summary
+                        th Date
+                        th Temperature (C)
+                        th Temperature (F)
+                        th Summary
+                tbody
+                    each forecast in forecasts
+                        tr
+                            td=forecast.date
+                            td=forecast.temperatureC
+                            td=forecast.temperatureF
+                            td=forecast.summary
+        else if !error
+            p(style="color: #666; font-style: italic;") No forecast data available.

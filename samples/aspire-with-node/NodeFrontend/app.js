@@ -1,5 +1,5 @@
 // Import instrumentation first - MUST be before any other imports
-import { createLogger } from './instrumentation.js';
+import { createLogger, recordCacheHit, recordCacheMiss, getCacheStats } from './instrumentation.js';
 
 import http from 'node:http';
 import https from 'node:https';
@@ -64,23 +64,71 @@ if (httpsOptions.enabled) {
 
 app.get('/', async (req, res) => {
     const logger = createLogger('nodefrontend.getForecastsEndpoint');
+    
+    // Get city from query parameter, default to Seattle
+    const city = req.query.city || 'Seattle';
+    const cacheKey = `forecasts:${city}`;
+    
     if (cache) {
-        const cachedForecasts = await cache.get('forecasts');
+        const cachedForecasts = await cache.get(cacheKey);
         if (cachedForecasts) {
-            logger.info('Cache hit for forecasts');
-            res.render('index', { forecasts: JSON.parse(cachedForecasts) });
+            logger.info('Cache hit for forecasts', { city });
+            recordCacheHit(city); // Record cache hit metric
+            res.render('index', { 
+                forecasts: JSON.parse(cachedForecasts),
+                city: city
+            });
             return;
         }
     }
 
-    logger.info('Cache miss - fetching from API', { apiServer: config.apiServer });
-    const response = await fetch(`${config.apiServer}/weatherforecast`);
-    const forecasts = await response.json();
-    if (cache) {
-        await cache.set('forecasts', JSON.stringify(forecasts), { 'EX': 30 }); // Cache for 30 seconds
-        logger.info('Forecasts cached for 30 seconds');
+    logger.info('Cache miss - fetching from API', { 
+        apiServer: config.apiServer,
+        city: city
+    });
+    recordCacheMiss(city); // Record cache miss metric
+    
+    try {
+        const response = await fetch(`${config.apiServer}/weatherforecast?city=${encodeURIComponent(city)}`);
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            logger.error('API returned error', { 
+                city,
+                status: response.status,
+                error: errorText
+            });
+            
+            res.render('index', { 
+                forecasts: [],
+                city: city,
+                error: `Unable to fetch weather data for ${city}. The service may be temporarily unavailable.`
+            });
+            return;
+        }
+        
+        const forecasts = await response.json();
+        if (cache) {
+            await cache.set(cacheKey, JSON.stringify(forecasts), { 'EX': 30 }); // Cache for 30 seconds
+            logger.info('Forecasts cached for 30 seconds', { city });
+        }
+        res.render('index', { 
+            forecasts: forecasts,
+            city: city,
+            error: null
+        });
+    } catch (error) {
+        logger.error('Failed to fetch weather data', {
+            city,
+            error: error.message
+        });
+        
+        res.render('index', { 
+            forecasts: [],
+            city: city,
+            error: `Failed to fetch weather data for ${city}. Please try again later.`
+        });
     }
-    res.render('index', { forecasts: forecasts });
 });
 
 // Configure templating
@@ -119,6 +167,23 @@ app.get('/alive', (req, res) => {
     const logger = createLogger('nodefrontend.aliveEndpoint');
     logger.info('Liveness check');
     res.status(200).send('Healthy');
+});
+
+// Cache statistics endpoint
+app.get('/cache-stats', (req, res) => {
+    const logger = createLogger('nodefrontend.cacheStatsEndpoint');
+    const stats = getCacheStats();
+    const total = stats.hits + stats.misses;
+    const hitRate = total > 0 ? ((stats.hits / total) * 100).toFixed(2) : 0;
+    
+    logger.info('Cache statistics requested', stats);
+    
+    res.json({
+        hits: stats.hits,
+        misses: stats.misses,
+        total: total,
+        hitRate: `${hitRate}%`
+    });
 });
 
 // Start servers
