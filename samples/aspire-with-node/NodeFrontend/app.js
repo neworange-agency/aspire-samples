@@ -1,6 +1,7 @@
 // Import instrumentation first - MUST be before any other imports
-import { createLogger, recordCacheHit, recordCacheMiss, getCacheStats } from './instrumentation.js';
+import { createLogger, recordCacheHit, recordCacheMiss, getCacheStats, getTracer, recordFetchSuccess } from './instrumentation.js';
 
+import { context, trace } from '@opentelemetry/api';
 import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';
@@ -31,6 +32,104 @@ const httpsOptions = fs.existsSync(config.certFile) && fs.existsSync(config.cert
 
 const startupLogger = createLogger('nodefrontend.startup');
 startupLogger.info('Application starting', { httpsEnabled: httpsOptions.enabled });
+
+// Get tracer for creating custom spans
+const tracer = getTracer();
+
+// Helper function to fetch forecasts with retry logic
+async function fetchForecastsWithRetry(city, maxRetries = 3) {
+    const logger = createLogger('nodefrontend.fetchWithRetry');
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        // Create a span for each retry attempt
+        const span = tracer.startSpan(`fetch_forecast_attempt_${attempt}`, {
+            attributes: {
+                'city': city,
+                'attempt': attempt,
+                'max_retries': maxRetries
+            }
+        });
+        
+        try {
+            // Execute fetch within the span context so HTTP instrumentation creates nested span
+            const result = await context.with(trace.setSpan(context.active(), span), async () => {
+                logger.info('Fetching forecasts', { city, attempt, maxRetries });
+                span.addEvent('Fetching forecast from API');
+                
+                // Pass attempt number to backend for retry logic
+                const url = `${config.apiServer}/weatherforecast?city=${encodeURIComponent(city)}&attempt=${attempt}`;
+                return await fetch(url);
+            });
+            
+            const response = result;
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                span.setAttribute('error', true);
+                span.setAttribute('http.status_code', response.status);
+                span.addEvent('API returned error', {
+                    'http.status_code': response.status,
+                    'error.message': errorText
+                });
+                
+                logger.warn('API returned error', { 
+                    city,
+                    attempt,
+                    status: response.status,
+                    error: errorText
+                });
+                
+                span.end();
+                
+                // If this is the last attempt, throw the error
+                if (attempt === maxRetries) {
+                    throw new Error(`API returned ${response.status}: ${errorText}`);
+                }
+                
+                // Wait before retrying (exponential backoff)
+                const delay = Math.pow(2, attempt - 1) * 100; // 100ms, 200ms, 400ms
+                logger.info('Retrying after delay', { city, attempt, delay });
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
+            }
+            
+            const forecasts = await response.json();
+            span.setAttribute('forecast.count', forecasts.length);
+            span.addEvent('Successfully fetched forecast', {
+                'forecast.count': forecasts.length
+            });
+            span.end();
+            
+            logger.info('Successfully fetched forecasts', { city, attempt, count: forecasts.length });
+            recordFetchSuccess(city, attempt);
+            return forecasts;
+            
+        } catch (error) {
+            span.setAttribute('error', true);
+            span.setAttribute('error.type', error.constructor.name);
+            span.addEvent('Error fetching forecast', {
+                'error.message': error.message
+            });
+            span.end();
+            
+            logger.error('Error fetching forecasts', {
+                city,
+                attempt,
+                error: error.message
+            });
+            
+            // If this is the last attempt, throw the error
+            if (attempt === maxRetries) {
+                throw error;
+            }
+            
+            // Wait before retrying (exponential backoff)
+            const delay = Math.pow(2, attempt - 1) * 1000; // 1000ms, 2000ms, 4000ms
+            logger.info('Retrying after delay', { city, attempt, delay });
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+}
 
 // Setup connection to Redis cache
 let cacheConfig = {
@@ -89,25 +188,8 @@ app.get('/', async (req, res) => {
     recordCacheMiss(city); // Record cache miss metric
     
     try {
-        const response = await fetch(`${config.apiServer}/weatherforecast?city=${encodeURIComponent(city)}`);
+        const forecasts = await fetchForecastsWithRetry(city, 3);
         
-        if (!response.ok) {
-            const errorText = await response.text();
-            logger.error('API returned error', { 
-                city,
-                status: response.status,
-                error: errorText
-            });
-            
-            res.render('index', { 
-                forecasts: [],
-                city: city,
-                error: `Unable to fetch weather data for ${city}. The service may be temporarily unavailable.`
-            });
-            return;
-        }
-        
-        const forecasts = await response.json();
         if (cache) {
             await cache.set(cacheKey, JSON.stringify(forecasts), { 'EX': 30 }); // Cache for 30 seconds
             logger.info('Forecasts cached for 30 seconds', { city });
@@ -118,7 +200,7 @@ app.get('/', async (req, res) => {
             error: null
         });
     } catch (error) {
-        logger.error('Failed to fetch weather data', {
+        logger.error('Failed to fetch weather data after retries', {
             city,
             error: error.message
         });

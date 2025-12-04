@@ -7,7 +7,7 @@ import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { ExpressInstrumentation } from '@opentelemetry/instrumentation-express';
 import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici';
 import { RedisInstrumentation } from '@opentelemetry/instrumentation-redis-4';
-import { metrics } from '@opentelemetry/api';
+import { metrics, trace } from '@opentelemetry/api';
 import winston from 'winston';
 import { OpenTelemetryTransportV3 } from '@opentelemetry/winston-transport';
 
@@ -59,6 +59,11 @@ export const cacheHitRateGauge = meter.createObservableGauge('cache.hit_rate', {
     unit: '%'
 });
 
+export const fetchSuccessCounter = meter.createCounter('fetch.success', {
+    description: 'Number of successful fetches by attempt number',
+    unit: 'requests'
+});
+
 // Track cache statistics
 let cacheStats = {
     hits: 0,
@@ -85,6 +90,17 @@ export function recordCacheMiss(city) {
 
 export function getCacheStats() {
     return { ...cacheStats };
+}
+
+export function recordFetchSuccess(city, attempt) {
+    fetchSuccessCounter.add(1, { city, attempt: attempt.toString() });
+}
+
+// Get tracer for creating custom spans
+const tracer = trace.getTracer('nodefrontend');
+
+export function getTracer() {
+    return tracer;
 }
 
 // Setup Winston logger factory with OpenTelemetry transport

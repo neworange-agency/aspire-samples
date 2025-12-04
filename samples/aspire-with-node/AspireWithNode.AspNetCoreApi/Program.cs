@@ -39,7 +39,7 @@ var forecastRequestCounter = meter.CreateCounter<long>("weather.forecast.request
 var forecastRequestDuration = meter.CreateHistogram<double>("weather.forecast.duration", "ms", "Duration of weather forecast requests");
 var cityRequestCounter = meter.CreateCounter<long>("weather.forecast.city.requests", "requests", "Number of requests per city");
 
-app.MapGet("/weatherforecast", (string? city = null) =>
+app.MapGet("/weatherforecast", (string? city = null, int attempt = 1) =>
 {
     // Start custom activity for distributed tracing
     using var activity = activitySource.StartActivity("GetWeatherForecast");
@@ -65,6 +65,29 @@ app.MapGet("/weatherforecast", (string? city = null) =>
         
         app.Logger.LogError("Weather service error for {City}", normalizedCity);
         throw new InvalidOperationException($"Weather service is currently unavailable for {normalizedCity}");
+    }
+    
+    // Simulate transient error for Phoenix (always fails on attempt 1, 50% on subsequent attempts)
+    if (normalizedCity.Equals("Phoenix", StringComparison.OrdinalIgnoreCase))
+    {
+        bool shouldFail = attempt == 1 || Random.Shared.Next(2) == 0;
+        
+        if (shouldFail)
+        {
+            activity?.SetTag("error", true);
+            activity?.SetTag("error.type", "TransientError");
+            activity?.SetTag("attempt", attempt);
+            activity?.AddEvent(new ActivityEvent("Error", 
+                tags: new ActivityTagsCollection
+                {
+                    ["error.message"] = attempt == 1 
+                        ? "Transient error on first attempt for Phoenix" 
+                        : "Random transient error for Phoenix"
+                }));
+            
+            app.Logger.LogWarning("Transient error for {City} on attempt {Attempt}", normalizedCity, attempt);
+            throw new InvalidOperationException($"Transient error occurred for {normalizedCity}. Please retry.");
+        }
     }
     
     // Add tags to the activity

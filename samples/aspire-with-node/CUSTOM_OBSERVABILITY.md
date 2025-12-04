@@ -48,6 +48,7 @@ The Node.js frontend exposes the following custom cache metrics:
 | `cache.hits` | Counter | hits | Number of cache hits | `city` |
 | `cache.misses` | Counter | misses | Number of cache misses | `city` |
 | `cache.hit_rate` | ObservableGauge | % | Real-time cache hit rate percentage | none |
+| `fetch.success` | Counter | requests | Number of successful fetches by attempt number | `city`, `attempt` |
 
 ### Viewing Custom Metrics
 
@@ -62,6 +63,7 @@ The Node.js frontend exposes the following custom cache metrics:
    - Request duration distribution
    - Cache hit/miss rates
    - Overall cache effectiveness
+   - Retry success rates by attempt number
 
 ### Example Queries
 
@@ -71,6 +73,11 @@ In the dashboard metrics viewer, you can:
 - Track `weather.forecast.city.requests` to monitor city-specific request patterns
 - Monitor `cache.hits` and `cache.misses` by city to understand caching effectiveness
 - Watch `cache.hit_rate` to see real-time cache performance (higher is better)
+- Analyze `fetch.success` by `attempt` dimension to see retry patterns:
+  - `attempt=1`: Requests that succeeded on first try
+  - `attempt=2`: Requests that required one retry
+  - `attempt=3`: Requests that required two retries
+- For Phoenix specifically, filter `fetch.success` by `city=Phoenix` to see the retry distribution
 
 ### Cache Statistics Endpoint
 
@@ -224,9 +231,11 @@ const response = await fetch(`${config.apiServer}/weatherforecast?city=${encodeU
 
 ## Error Handling and Observability
 
-The Boston city intentionally throws an error to demonstrate comprehensive error observability:
+### Boston - Permanent Error
 
-### Backend Error Handling
+The Boston city intentionally throws a permanent error to demonstrate comprehensive error observability:
+
+**Backend Error Handling**
 
 When Boston is requested, the API:
 1. Sets `error` tag to `true` on the activity
@@ -234,6 +243,53 @@ When Boston is requested, the API:
 3. Adds an `Error` event with error message details
 4. Logs an error message with structured logging
 5. Throws an `InvalidOperationException`
+
+### Phoenix - Transient Errors with Retry
+
+The Phoenix city demonstrates resilience patterns with transient errors and automatic retry:
+
+**Backend Transient Error (Deterministic on First Attempt, Random on Subsequent)**
+
+When Phoenix is requested, the API receives an `attempt` parameter from the frontend:
+- **Attempt 1**: Always fails (100% failure rate)
+- **Attempt 2+**: 50% chance of failure (random)
+
+When a failure occurs, the API will:
+1. Set `error` tag to `true` on the activity
+2. Set `error.type` tag to `TransientError`
+3. Set `attempt` tag showing which attempt failed
+4. Add an `Error` event with transient error details
+5. Log a warning message with the attempt number
+6. Throw an `InvalidOperationException` with a retry-friendly message
+
+This simulates realistic transient errors where the first attempt always fails when data is not cached, and subsequent attempts may still fail randomly.
+
+**Frontend Retry Logic**
+
+The frontend implements resilient retry logic:
+1. Attempts up to 3 times to fetch the forecast
+2. Passes the current `attempt` number (1, 2, or 3) to the backend API via query parameter
+3. Each retry creates a separate span: `fetch_forecast_attempt_1`, `fetch_forecast_attempt_2`, `fetch_forecast_attempt_3`
+4. Each span includes:
+   - Attributes: `city`, `attempt`, `max_retries`
+   - Events: fetch start, success/error details
+   - Error tags on failed attempts
+5. Implements exponential backoff between retries (1s, 2s, 4s)
+6. Only shows error to user after all retries are exhausted
+
+**Viewing Retry Traces**
+
+In the Aspire Dashboard Traces view:
+1. Request Phoenix weather forecast (ensure not cached by waiting 30+ seconds or restarting)
+2. Find traces with multiple `fetch_forecast_attempt_X` spans
+3. Observe:
+   - First attempt (`fetch_forecast_attempt_1`) will always show an error with `attempt=1` tag
+   - Second attempt (`fetch_forecast_attempt_2`) has 50% chance of success or error
+   - Third attempt (`fetch_forecast_attempt_3`) has 50% chance of success or error
+   - Timing shows exponential backoff delays (1s, 2s, 4s) between attempts
+   - All retry attempts are visible as separate spans in the same trace
+   - Some traces may require all 3 attempts, others may succeed on attempt 2
+4. Once cached, subsequent Phoenix requests succeed immediately on first attempt (cache hit, no retries)
 
 ### Frontend Error Handling
 
